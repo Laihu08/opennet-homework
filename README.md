@@ -1,140 +1,252 @@
 # Slot game homework
 
-The main configuration gives exactly **95% RTP** and **70.6545% wins**.
-A second configuration covers the alternative full-screen payout rule.
-Python 3.10+; no dependencies.
-
-## Run
-
-From this folder:
+Requires Python 3.10 or newer. No dependencies.
 
 ```bash
 python3 slot_math.py                           # Verify the main configuration
 python3 slot_math.py reels_replace_blocks.json # Verify the alternative
 python3 -m unittest -v                         # Run tests
-python3 generate.py                           # Regenerate reels.json
+python3 generate.py                           # Regenerate the main configuration
 python3 generate.py --full-screen-policy replace-blocks
 ```
 
-The last command writes `reels_replace_blocks.json`. Both files save their payout
-policy, which the verifier reads automatically.
+See the [original assignment](assignment.md) and [technical notes](technical-notes.md)
+for the requirements and full derivation.
 
-## Rules and assumptions
+**1. How I understood the problem**
 
-- Reels are circular. A stop shows that position and the next two symbols.
-- Every stop is equally likely, and the three reels stop independently.
-- Matching 2×2 patterns pay separately, including overlapping blocks.
-- Each payout uses the total bet. The stake is not returned separately.
-- A win means any positive payout, including payouts below the bet.
+I treated this as a probability problem with two constraints: RTP must be
+exactly 95%, and at least 55% of spins must produce a payout.
 
-The assignment does not say whether a full screen also pays its four matching
-blocks. The main configuration uses **additive** payouts:
-`(4 + 5) × multiplier × bet`. The alternative uses **replace-blocks**:
-`5 × multiplier × bet` on a full screen. These rules need different reels.
+The symbols, multipliers, and winning patterns are fixed. I can change the
+length of each reel and the order of its symbols.
 
-## Configurations
+I separated the work into a generator and an evaluator. The generator finds
+candidate reels. The evaluator checks what those reels actually pay.
 
-Each array below gives consecutive run lengths for symbols `[0, 1, 2, 3, 4]`.
-For example, `[20, 2, 2, 2, 2]` means twenty zeros, then two of each remaining
-symbol, wrapping back to zero.
-
-| Configuration | Left and right runs | Middle runs | Reel lengths |
-| --- | --- | --- | --- |
-| [reels.json](reels.json) | `[20, 2, 2, 2, 2]` | `[86, 2, 9, 15, 5]` | 28, 117, 28 |
-| [reels_replace_blocks.json](reels_replace_blocks.json) | `[48, 2, 2, 2, 2]` | `[226, 2, 2, 8, 3]` | 56, 241, 56 |
-
-The outer reels have the same sequence but stop independently. Every symbol
-can produce block wins. Only symbol 0 can fill the full screen, because the
-other symbols have runs of length two on the outer reels.
-
-| Payout rule | Exact RTP | Win rate: payout > 0 | Net-profit rate: payout > bet | Stop combinations |
-| --- | ---: | ---: | ---: | ---: |
-| Additive | 19/20 | 70.65454387% | 31.82888540% | 91,728 |
-| Replace blocks | 19/20 | 92.17889957% | 62.97791938% | 755,776 |
-
-The main configuration misses the 55% target if a win must exceed the stake.
-The table reports both definitions.
-
-## Approach
-
-A 2×2 win needs matching adjacent symbols on neighboring reels. A run of length
-`n` has `n - 1` matching pairs and `n - 2` matching triples when its neighbors
-are different. Long zero runs provide frequent low-paying wins; the other
-lengths adjust RTP.
-
-For symbol `s`, let `a[j,s]` be its matching-pair probability on reel `j`,
-`t[j,s]` its matching-triple probability, and `m[s]` its multiplier:
-
-```text
-RTP = Σ_s m[s] × (
-          2 × a[middle,s] × (a[left,s] + a[right,s])
-        + k × t[left,s] × t[middle,s] × t[right,s]
-      )
+```mermaid
+flowchart TD
+    A[Assignment and game rules] --> B[generate.py: find valid run lengths]
+    B --> C[JSON: ordered reels and payout policy]
+    C --> D[slot_math.py: evaluate the configuration]
+    D --> E[Exact RTP and win rate]
+    T[test_slot_math.py] -. Checks .-> B
+    T -. Checks .-> D
 ```
 
-The first term covers all four blocks. On a full screen it already pays `4×`,
-so `k = 5` gives the additive total of `9×`, and `k = 1` gives the replacement
-total of `5×`. Expected payouts add even when patterns overlap. Win probabilities
-do not, so the verifier counts winning outcomes separately.
+**2. How I modeled a spin**
 
-For the main configuration, the outer reels give:
+Each reel is a circular list. A stop shows that position and the next two
+symbols. For example:
 
 ```text
-L = 28                       # Reel length
-A = [19, 1, 1, 1, 1]         # Matching pair counts
-T = [18, 0, 0, 0, 0]         # Matching triple counts
-w = [5, 11, 20, 60, 100]     # Multipliers × 20
+Reel: [0, 0, 1, 2, 3, 4]
+
+Stop at index 0 -> [0, 0, 1]
+Stop at index 5 -> [4, 0, 0]
 ```
 
-Let `n[s]` be each middle run length and `N` their sum. Substituting gives:
+Every position is equally likely, and the three reels stop independently.
+The symbols within a column are linked by the reel arrangement, so I don't
+treat the nine cells as independent draws.
+
+In the code, `windows()` builds the visible columns and `score_screen()`
+checks the four blocks and the full-screen pattern.
+
+For this screen, only the upper-left block wins:
 
 ```text
-RTP = Σ_s w[s] × (4 × A[s] × L × (n[s] - 1)
-                  + 5 × T[s]² × (n[s] - 2)) / (20 × L² × N)
+0  0  3
+0  0  4
+1  2  3
 ```
 
-Setting this to `19/20` and clearing the denominators gives:
+With a bet of 100, that block pays `100 × 0.25 = 25`.
+It counts as a positive payout, but it is a net loss of 75.
+I report payout frequency and net-profit frequency separately.
+
+**3. How I handled the unclear rule**
+
+The assignment doesn't say whether a full screen also pays its four matching
+blocks. I supported both interpretations:
 
 ```text
-3844 n[0] - 13664 n[1] - 12656 n[2] - 8176 n[3] - 3696 n[4] = 48232
+Full screen of zeros, bet = 100
+
+Additive:      4 × 25 + 5 × 25 = 225
+Replacement:           5 × 25 = 125
 ```
 
-The generator tries outer runs `[z, 2, 2, 2, 2]` with `z` from 20 through 60.
-For each, it tries middle runs of 2–15 for symbols 1–4 and solves the RTP equation
-for the zero run. It keeps integer answers from 2–250, checks the win rate,
-and returns the first valid configuration. The same method handles either
-payout policy by changing `k`.
+`reels.json` uses additive payouts. `reels_replace_blocks.json` uses replacement
+payouts. Each file stores its rule, so the verifier selects it automatically.
+Matching blocks still pay separately under both policies on other screens.
 
-The search is deterministic and does not optimize reel length. Finding no
-result within these bounds would not prove that the assignment is impossible.
+**4. Why I used runs of symbols**
 
-## Verification
-
-The verifier scores every stop combination. Repeated screens count separately
-when they come from different stops. Payouts use integer ticks of `bet / 20`,
-and ratios use `Fraction`, so passing does not depend on rounded decimals.
+A block win needs matching adjacent symbols on neighboring reels. Grouping
+symbols into runs makes those matches easy to count.
 
 ```text
-Main configuration:
-Total payout ticks: 1,742,832
-RTP = 1,742,832 / (20 × 91,728) = 19/20
+Run: 0 0 0 0
+
+Matching pairs:   3
+Matching triples: 2
+```
+
+A run of length `n`, surrounded by different symbols, has `n - 1` matching
+pairs and `n - 2` matching triples.
+
+For the main outer reels, the run lengths are `[20, 2, 2, 2, 2]`, giving
+28 positions. The zero-pair probability is `19/28`, and the zero-triple
+probability is `18/28`.
+
+A zero block on the left needs a zero pair on both the left and middle reels.
+Because their stops are independent, I multiply those pair probabilities.
+Multiplying by the payout gives that event's expected contribution.
+
+I add the expected contributions of all symbols and patterns to get RTP.
+
+**5. How I found the reel lengths**
+
+I searched a limited family of reels:
+
+```text
+Outer run lengths:  [z, 2, 2, 2, 2]
+Middle run lengths: [n0, n1, n2, n3, n4]
+```
+
+For each outer configuration, I try lengths for symbols 1 through 4 in the
+middle reel, then solve the RTP equation for the zero run.
+
+For the main outer reels, setting RTP to `19/20` gives:
+
+```text
+3844 n0 - 13664 n1 - 12656 n2 - 8176 n3 - 3696 n4 = 48232
+```
+
+The coefficients come from the pair counts, triple counts, and payouts.
+Once the other four lengths are chosen, `n0` follows directly.
+
+```mermaid
+flowchart TD
+    A[Choose payout policy] --> B[Choose next candidate in the bounded search]
+    B --> C[Solve the RTP equation for the middle zero run]
+    C --> D{Integer from 2 to 250?}
+    D -- No --> B
+    D -- Yes --> E[Build reels and evaluate every stop combination]
+    E --> F{RTP is 95%, win rate at least 55%, and analytical RTP agrees?}
+    F -- No --> B
+    F -- Yes --> G[Save the reels and policy]
+    B -- No candidates left --> H[Report no solution within these bounds]
+```
+
+The search tries outer zero runs from 20 to 60 and middle runs from 2 to 15
+for the other symbols. It returns the first valid answer and is reproducible.
+
+The main result, expressed as run lengths, is:
+
+```text
+Left:   [20, 2, 2,  2, 2]
+Middle: [86, 2, 9, 15, 5]
+Right:  [20, 2, 2,  2, 2]
+```
+
+**6. How I verified the result**
+
+The main reels have `28 × 117 × 28 = 91,728` equally likely stop combinations.
+I score all of them, including repeated screens produced by different stops.
+
+I use integer payout ticks, where one tick is `bet / 20`. The multiplier
+`0.55`, for example, becomes exactly 11 ticks. Ratios use Python's `Fraction`.
+
+```mermaid
+flowchart TD
+    A[Load saved reels and payout policy] --> B[Enumerate every stop combination]
+    A --> C[Count pair and triple probabilities]
+    B --> D[Score screens and count payout frequencies]
+    D --> E[Exact RTP, win rate, and net-profit rate]
+    C --> F[Analytical RTP]
+    E --> G{Both RTP calculations agree and targets pass?}
+    F --> G
+    G -- Yes --> H[PASS]
+    G -- No --> I[Report failure or calculation mismatch]
+```
+
+For the main configuration:
+
+```text
+Winning outcomes = 64,810
 Win rate = 64,810 / 91,728 = 70.65454387%
+
+Total payout ticks = 1,742,832
+RTP = 1,742,832 / (20 × 91,728) = 19/20 exactly
 ```
 
-A separate calculation using pair and triple probabilities must agree with
-enumeration. Tests cover scoring, overlaps, wraparound, repeated stops, invalid
-input, both payout policies, and regeneration of both saved configurations.
+The analytical calculation agrees. All 11 tests pass, covering scoring,
+wraparound, overlaps, policy selection, and regeneration of both configurations.
 
-A policy flag overrides the rule stored in a file. For example:
+**7. Results**
 
-```bash
-python3 slot_math.py reels.json --full-screen-policy replace-blocks
-```
+| Payout policy | Exact RTP | Positive-payout rate | Net-profit rate |
+| --- | ---: | ---: | ---: |
+| Additive | 95% | 70.65% | 31.83% |
+| Replacement | 95% | 92.18% | 62.98% |
 
-This deliberately applies the other rule to the main reels: RTP becomes
-65.3297%, and the verifier exits with status 1. A successful verification exits
-with status 0. Enumeration takes `O(L_left × L_middle × L_right)` time.
+Both configurations meet the positive-payout definition of win rate.
+The replacement configuration also exceeds 55% under the net-profit definition.
 
-The original requirements are in [assignment.md](assignment.md).
+**8. Questions I would expect**
 
-See the [solution walkthrough](walkthrough.md) for flowcharts and follow-up questions.
+- **Why not just simulate?** Simulation estimates RTP with sampling error.
+  These reels are small enough to count every outcome and prove the result
+  is exactly `19/20`.
+
+- **Patterns overlap. Why can you add their payouts?** Expectation is linear,
+  even when the events are dependent. For win rate, I count each stop combination
+  once if its total payout is positive.
+
+- **Why focus on the middle reel?** Every winning pattern uses it. Once the
+  outer reels are fixed, solving for its run lengths gives a simple RTP equation.
+  I don't use blanks; the reels contain only the five specified symbols.
+
+- **Why are the outer reels identical?** It reduces the search variables and
+  simplifies the equation. Their stopping positions remain independent.
+
+- **Did you find the fewest possible stops?** No. I return the first valid
+  result in a bounded search. The main configuration has only 91,728 stop
+  combinations, which makes exhaustive checking practical.
+
+- **What is the main weakness?** Long zero runs make the game repetitive.
+  In the main configuration, a full screen of zeros occurs on `27/91`, or about
+  29.67%, of spins. Only symbol 0 can fill the full screen. For a more varied
+  game, I would try shorter zero runs and more symbol arrangements, then solve
+  and verify the constraints again. Splitting runs into `0 0` pairs removes
+  zero triples but also changes RTP and win rate; it is not a free fix.
+
+- **What if the full-screen rule means something else?** Applying replacement
+  payouts to the main reels gives 65.3297% RTP. I provide a separately generated
+  replacement configuration that restores exactly 95% RTP.
+
+- **What if a win means profit?** The main configuration then misses the target
+  at 31.83%. The replacement configuration reaches 62.98%. I would confirm both
+  the payout rule and the win definition before choosing the final configuration.
+
+- **Why use integers and fractions?** They make the RTP comparison exact.
+  Decimal percentages are only used for display.
+
+- **Do matching calculations prove the whole program is correct?** They check
+  the result in two ways, but both use the same model and window helper. I also
+  test hand-checkable screens and wraparound cases. The proof remains conditional
+  on the stated game rules.
+
+- **What if the reels become much larger?** Direct enumeration takes
+  `O(L_left × L_middle × L_right)` time. I could group identical visible columns
+  and weight them by their stop counts to reduce repeated work without losing
+  exactness. The current verifier uses direct enumeration.
+
+- **Why no machine learning?** The rules and probabilities are fully specified.
+  An equation and a bounded search are enough to find and verify a valid answer.
+
+- **What if the search finds nothing?** That only means this family and these
+  bounds produced no solution. I would expand the bounds or change the run
+  structure; it would not prove the assignment impossible.
